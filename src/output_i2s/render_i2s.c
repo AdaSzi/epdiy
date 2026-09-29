@@ -191,7 +191,9 @@ void IRAM_ATTR epd_push_pixels_i2s(RenderContext_t* ctx, EpdRect area, short tim
         uint8_t mask = color_choice[color] & (0b00000011 << (2 * (position % 4)));
         row[area.x / 4 + position / 4] |= mask;
     }
+#if EPD_ROW_OUTPUT_NEEDS_REORDER
     reorder_line_buffer((uint32_t*)row, line_bytes);
+#endif
 
     i2s_start_frame();
 
@@ -254,7 +256,9 @@ void IRAM_ATTR i2s_output_frame(RenderContext_t* ctx, int thread_id) {
         // apply the line mask
         epd_apply_line_mask(i2s_get_current_buffer(), ctx->line_mask, ctx->display_width / 4);
 
+#if EPD_ROW_OUTPUT_NEEDS_REORDER
         reorder_line_buffer((uint32_t*)i2s_get_current_buffer(), ctx->display_width / 4);
+#endif
         i2s_write_row(ctx, frame_time);
     }
     if (!ctx->skipping) {

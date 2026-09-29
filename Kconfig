@@ -1,0 +1,21 @@
+menu "EPDiy"
+
+    config EPD_ESP32S3_I80_ROW_OUTPUT
+        bool "ESP32-S3: row-by-row output over the LCD_CAM i80 bus (shift-register boards)"
+        depends on IDF_TARGET_ESP32S3
+        default n
+        help
+            The default ESP32-S3 render method streams whole frames through the LCD_CAM
+            peripheral and needs the latch (LEH) and vertical start (STV) lines on real GPIOs.
+
+            Some boards (for example the LILYGO T5-4.7 S3 "V2.3"/"V2.4") drive LEH, STV,
+            output enable, mode and the panel power rails through a 74HCT4094 shift register
+            instead. Those boards need the older, row-by-row render method that latches every
+            row through the board's set_ctrl() callback, which epdiy so far only had for the
+            original ESP32 (I2S peripheral).
+
+            Enable this option to use that render method on the ESP32-S3, with the pixel data
+            of each row sent over the LCD_CAM peripheral in i80 mode. Leave it disabled for
+            all boards that wire the control lines to GPIOs (epd_board_v7 and similar).
+
+endmenu

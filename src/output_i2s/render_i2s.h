@@ -7,6 +7,7 @@
 #include <soc/gpio_struct.h>
 
 #include "../output_common/render_context.h"
+#include "../output_common/render_method.h"
 #include "sdkconfig.h"
 
 /**
@@ -38,20 +39,25 @@ void i2s_deinit();
  * Write bits directly using the registers in the ESP32.
  * Won't work for some pins (>= 32).
  */
-inline void fast_gpio_set_hi(gpio_num_t gpio_num) {
+static inline void fast_gpio_set_hi(gpio_num_t gpio_num) {
 #ifdef CONFIG_IDF_TARGET_ESP32
     gpio_dev_t* device = GPIO_LL_GET_HW(GPIO_PORT_0);
     device->out_w1ts = (1 << gpio_num);
+#elif defined(EPD_I2S_ON_I80)
+    // handles the pins of the second GPIO bank (32 and up) as well
+    gpio_ll_set_level(GPIO_LL_GET_HW(GPIO_PORT_0), gpio_num, 1);
 #else
     // not supportd on non ESP32 chips
     assert(false);
 #endif
 }
 
-inline void fast_gpio_set_lo(gpio_num_t gpio_num) {
+static inline void fast_gpio_set_lo(gpio_num_t gpio_num) {
 #ifdef CONFIG_IDF_TARGET_ESP32
     gpio_dev_t* device = GPIO_LL_GET_HW(GPIO_PORT_0);
     device->out_w1tc = (1 << gpio_num);
+#elif defined(EPD_I2S_ON_I80)
+    gpio_ll_set_level(GPIO_LL_GET_HW(GPIO_PORT_0), gpio_num, 0);
 #else
     // not supportd on non ESP32 chips
     assert(false);

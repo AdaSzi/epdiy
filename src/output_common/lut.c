@@ -171,7 +171,7 @@ void IRAM_ATTR calc_epd_input_1ppB_1k_S3_VE_aligned(
     const uint32_t* ld, uint8_t* epd_input, const uint8_t* conversion_lut, uint32_t epd_width
 );
 
-#ifdef RENDER_METHOD_I2S
+#if defined(RENDER_METHOD_I2S) && !defined(CONFIG_IDF_TARGET_ESP32S3)
 void calc_epd_input_1ppB_1k_S3_VE_aligned(
     const uint32_t* ld, uint8_t* epd_input, const uint8_t* conversion_lut, uint32_t epd_width
 ) {

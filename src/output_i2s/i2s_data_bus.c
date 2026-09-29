@@ -331,4 +331,170 @@ void i2s_bus_deinit() {
 #endif
 }
 
+/*
+ * ESP32-S3 replacement for the I2S data bus, built on the LCD_CAM peripheral in i80 mode.
+ *
+ * It exposes the same interface as the ESP32 I2S implementation above, so the row-by-row render
+ * method (render_i2s.c) and the shift-register board definitions work unchanged. One call to
+ * i2s_start_line_output() sends one row of pixel data. Row latching, CKV pulses and all other
+ * control lines are handled by the board and the RMT pulse code, exactly as on the ESP32.
+ *
+ * Wiring of the i80 signals:
+ *   WR  -> CKH (pixel clock),   D/C -> STH (start pulse, active low),   D0..D7 -> data lines
+ *
+ * The start pulse comes from the D/C line: it idles low, goes high for a short dummy command
+ * phase in front of every row and returns low for the data phase. This is the arrangement of
+ * LILYGO's own ESP32-S3 driver. On a LILYGO T5-4.7 S3 the panel stayed blank with the plain
+ * arrangement (D/C idle high, low only during the data phase) and works with this one.
+ *
+ * The data pins are attached to the bus in the same pairwise swapped order the ESP32 I2S code
+ * uses: { d6, d7, d4, d5, d2, d3, d0, d1 }.
+ */
+#elif defined(CONFIG_IDF_TARGET_ESP32S3) && defined(CONFIG_EPD_ESP32S3_I80_ROW_OUTPUT)
+
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_check.h"
+#include "esp_heap_caps.h"
+#include "esp_lcd_io_i80.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_log.h"
+
+static const char* TAG = "epdiy-i80";
+
+/// Pixel clock of the i80 bus, in Hz (one byte, i.e. four pixels, per clock).
+#define I80_PCLK_HZ (10 * 1000 * 1000)
+
+typedef struct {
+    esp_lcd_i80_bus_handle_t bus;
+    esp_lcd_panel_io_handle_t io;
+    /// Front and back row buffer. One is filled while the other is being transmitted.
+    uint8_t* buf[2];
+    size_t row_bytes;
+    /// Index of the buffer that is currently writable.
+    int current;
+} i80_state_t;
+
+static i80_state_t i80;
+
+/// Set by the transfer-done interrupt; cleared when a new row transmission is started.
+static volatile bool output_done = true;
+
+static bool IRAM_ATTR on_trans_done(
+    esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t* edata, void* user_ctx
+) {
+    (void)panel_io;
+    (void)edata;
+    (void)user_ctx;
+    output_done = true;
+    return false;
+}
+
+uint8_t* IRAM_ATTR i2s_get_current_buffer() {
+    return i80.buf[i80.current];
+}
+
+bool IRAM_ATTR i2s_is_busy() {
+    return !output_done;
+}
+
+void IRAM_ATTR i2s_switch_buffer() {
+    // The render code only starts a new transmission after the previous one has finished, and
+    // starts it on the buffer that is written to. After switching, the other buffer is therefore
+    // never in use by the hardware.
+    i80.current = !i80.current;
+}
+
+void IRAM_ATTR i2s_start_line_output() {
+    output_done = false;
+    // cmd 0: the (dummy) command phase generates the start pulse, see above
+    esp_err_t err = esp_lcd_panel_io_tx_color(i80.io, 0, i80.buf[i80.current], i80.row_bytes);
+    if (err != ESP_OK) {
+        // never leave the renderer waiting for a transfer that did not start
+        output_done = true;
+        ESP_DRAM_LOGE(TAG, "row transmission failed");
+    }
+}
+
+void i2s_gpio_attach(i2s_bus_config* cfg) {
+    // The bus keeps ownership of its pins between refreshes. Unlike on the ESP32, the pins are
+    // not released when the panel is powered off.
+    (void)cfg;
+}
+
+void i2s_gpio_detach(i2s_bus_config* cfg) {
+    (void)cfg;
+}
+
+void i2s_bus_init(i2s_bus_config* cfg, uint32_t epd_row_width) {
+    // Bytes per row: 4 pixels per byte, plus the dummy pixels the board asks for as timing
+    // headroom.
+    i80.row_bytes = (epd_row_width / 4 + 3) & ~3U;
+    i80.current = 0;
+    output_done = true;
+
+    for (int i = 0; i < 2; i++) {
+        // 16 byte alignment for the vector-extension lookup routines, internal RAM for the DMA.
+        i80.buf[i] = heap_caps_aligned_calloc(
+            16, 1, i80.row_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+        );
+        assert(i80.buf[i] != NULL);
+    }
+
+    esp_lcd_i80_bus_config_t bus_config = {
+        .dc_gpio_num = cfg->start_pulse,
+        .wr_gpio_num = cfg->clock,
+        .clk_src = LCD_CLK_SRC_DEFAULT,
+        .data_gpio_nums = {
+            cfg->data_6,
+            cfg->data_7,
+            cfg->data_4,
+            cfg->data_5,
+            cfg->data_2,
+            cfg->data_3,
+            cfg->data_0,
+            cfg->data_1,
+        },
+        .bus_width = 8,
+        .max_transfer_bytes = i80.row_bytes,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_i80_bus(&bus_config, &i80.bus));
+
+    esp_lcd_panel_io_i80_config_t io_config = {
+        .cs_gpio_num = -1,
+        .pclk_hz = I80_PCLK_HZ,
+        .trans_queue_depth = 4,
+        .on_color_trans_done = on_trans_done,
+        .user_ctx = NULL,
+        .lcd_cmd_bits = 10,
+        .lcd_param_bits = 0,
+        .dc_levels = {
+            .dc_idle_level = 0,
+            .dc_cmd_level = 1,
+            .dc_dummy_level = 0,
+            .dc_data_level = 0,
+        },
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i80(i80.bus, &io_config, &i80.io));
+
+    ESP_LOGI(TAG, "i80 row output ready, %u bytes per row", (unsigned)i80.row_bytes);
+}
+
+void i2s_bus_deinit() {
+    if (i80.io != NULL) {
+        esp_lcd_panel_io_del(i80.io);
+        i80.io = NULL;
+    }
+    if (i80.bus != NULL) {
+        esp_lcd_del_i80_bus(i80.bus);
+        i80.bus = NULL;
+    }
+    for (int i = 0; i < 2; i++) {
+        heap_caps_free(i80.buf[i]);
+        i80.buf[i] = NULL;
+    }
+}
+
 #endif

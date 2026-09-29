@@ -180,7 +180,13 @@ int rmt_compat_get_irq_source(void) {
 }
 
 void rmt_compat_tx_enable_interrupt(rmt_compat_channel_t channel, bool enable) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    // ESP32-S3: tx_end interrupt bits are 0..3 (one per TX channel)
+    const uint32_t tx_end_bit = 1u << channel;
+#else
+    // ESP32: three interrupt bits per channel (tx_end, rx_end, err)
     const uint32_t tx_end_bit = 1u << (channel * 3);
+#endif
     if (enable) {
         RMT.int_ena.val |= tx_end_bit;
     } else {
